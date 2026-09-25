@@ -5,8 +5,9 @@
  * Design language: aerospace instrumentation × engineering blueprint.
  * Bright, warm off-white base (never pure white), a single safety-orange
  * accent, deep instrument-navy for secondary emphasis. No gradients —
- * every surface is a flat, considered color with hairline rules and
- * viewfinder-style corner marks borrowed from drone camera HUDs.
+ * every surface is a flat, considered color with hairline rules,
+ * viewfinder-style corner marks, and a flight-plan HUD borrowed from
+ * drone ground-control software.
  */
 
 import {
@@ -14,6 +15,7 @@ import {
   useEffect,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
   type FormEvent,
   type MouseEvent as ReactMouseEvent,
@@ -37,6 +39,22 @@ const mono = IBM_Plex_Mono({
   weight: ['400', '500'],
   variable: '--font-mono',
 });
+
+const reducedMotionQuery = '(prefers-reduced-motion: reduce)';
+
+function subscribeToReducedMotion(callback: () => void) {
+  const mediaQuery = window.matchMedia(reducedMotionQuery);
+  mediaQuery.addEventListener?.('change', callback);
+  return () => mediaQuery.removeEventListener?.('change', callback);
+}
+
+function getReducedMotionSnapshot() {
+  return window.matchMedia(reducedMotionQuery).matches;
+}
+
+function getServerReducedMotionSnapshot() {
+  return false;
+}
 
 /* ----------------------------------------------------------------------- */
 /*  Data                                                                    */
@@ -111,6 +129,7 @@ const FIRMWARE: FirmwareProduct[] = [
 
 interface ComponentItem {
   id: string;
+  kind: 'frame' | 'motor';
   name: string;
   description: string;
   price: number;
@@ -120,12 +139,14 @@ interface ComponentItem {
 const COMPONENTS: ComponentItem[] = [
   {
     id: 'frame-v1',
+    kind: 'frame',
     name: 'Drone Frame v1.0',
     description: '3D printed airframe built for the 8520 coreless motor.',
     price: 299,
   },
   {
     id: 'frame-v2',
+    kind: 'frame',
     name: 'Drone Frame v2.0',
     description: 'Revised 8520 coreless-motor airframe — lighter, stiffer.',
     price: 299,
@@ -133,6 +154,7 @@ const COMPONENTS: ComponentItem[] = [
   },
   {
     id: 'motor-driver',
+    kind: 'motor',
     name: 'Motor Driver Module',
     description: 'Compact driver module for precise, low-latency ESC control.',
     price: 199,
@@ -188,6 +210,33 @@ const CONTACT_CHANNELS = [
 const clamp = (n: number, min: number, max: number) => Math.min(max, Math.max(min, n));
 const rand = (min: number, max: number) => Math.random() * (max - min) + min;
 const currency = (n: number) => `₹${n.toLocaleString('en-IN')}`;
+
+/** Subtle cursor-reactive tilt + glare for cards. Motion is user-triggered
+ *  (hover), so it stays inside the "answers a person's action" allowance. */
+function useTilt<T extends HTMLElement>() {
+  const ref = useRef<T | null>(null);
+
+  const onMove = useCallback((e: ReactMouseEvent<T>) => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const px = (e.clientX - r.left) / r.width;
+    const py = (e.clientY - r.top) / r.height;
+    el.style.setProperty('--tiltX', `${((0.5 - py) * 4.5).toFixed(2)}deg`);
+    el.style.setProperty('--tiltY', `${((px - 0.5) * 6.5).toFixed(2)}deg`);
+    el.style.setProperty('--glareX', `${(px * 100).toFixed(1)}%`);
+    el.style.setProperty('--glareY', `${(py * 100).toFixed(1)}%`);
+  }, []);
+
+  const onLeave = useCallback(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.setProperty('--tiltX', '0deg');
+    el.style.setProperty('--tiltY', '0deg');
+  }, []);
+
+  return { ref, onMove, onLeave };
+}
 
 /* ----------------------------------------------------------------------- */
 /*  Icons — hand-drawn line marks, kept to one weight and one grid          */
@@ -298,6 +347,52 @@ function IconFrame({ className }: IconProps) {
   );
 }
 
+function IconMotor({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" fill="none" className={className} aria-hidden="true">
+      <circle cx="24" cy="24" r="11" stroke="currentColor" strokeWidth="1.6" />
+      <circle cx="24" cy="24" r="3" fill="currentColor" />
+      <path
+        d="M24 13v-5M24 40v-5M35 24h5M8 24h5M31.8 16.2l3.5-3.5M12.7 35.3l3.5-3.5M31.8 31.8l3.5 3.5M12.7 12.7l3.5 3.5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function IndianFlag({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 30 20"
+      fill="none"
+      className={className}
+      role="img"
+      aria-label="Flag of India"
+      preserveAspectRatio="xMidYMid meet"
+    >
+      <path d="M0 0h30v6.667H0z" fill="#FF9933" />
+      <path d="M0 6.667h30v6.666H0z" fill="#FFFFFF" />
+      <path d="M0 13.333h30V20H0z" fill="#138808" />
+      <circle cx="15" cy="10" r="1.9" stroke="#000080" strokeWidth="0.4" />
+      {Array.from({ length: 24 }, (_, index) => (
+        <line
+          key={index}
+          x1="15"
+          y1="8.25"
+          x2="15"
+          y2="11.75"
+          stroke="#000080"
+          strokeWidth="0.22"
+          transform={`rotate(${index * 15} 15 10)`}
+        />
+      ))}
+      <circle cx="15" cy="10" r="0.35" fill="#000080" />
+    </svg>
+  );
+}
+
 function IconSignal({ className, level }: IconProps & { level: number }) {
   const bars = [4, 8, 12, 16];
   return (
@@ -349,15 +444,38 @@ function SectionHeading({
 }) {
   return (
     <div className={align === 'center' ? 'text-center' : 'text-left'}>
-      <div className="flex items-center gap-2 text-[13px] font-medium tracking-[0.01em] text-[#5B6058]">
+      <div className={`flex items-center gap-2 text-[13px] font-medium tracking-[0.01em] text-[#5B6058] ${align === 'center' ? 'justify-center' : ''}`}>
         <span className="h-[6px] w-[6px] rounded-full bg-[#E15B12]" />
         {kicker}
       </div>
-      <h2
-        className="mt-3 text-[clamp(2rem,4.4vw,3rem)] leading-[1.05] text-[#14181B] [font-family:var(--font-display)] font-bold"
-      >
+      <h2 className="mt-3 text-[clamp(2.1rem,4.4vw,3.1rem)] leading-[1.05] text-[#14181B] [font-family:var(--font-display)] font-bold">
         {title}
       </h2>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------- */
+/*  Altitude indicator — a scroll-position readout, doubling as a subtle    */
+/*  progress cue. Desktop only; keeps the instrument-panel idea going       */
+/*  past the hero instead of adding a generic progress bar.                 */
+/* ----------------------------------------------------------------------- */
+
+function AltitudeIndicator({ progress }: { progress: number }) {
+  return (
+    <div className="pointer-events-none fixed left-6 top-1/2 z-40 hidden -translate-y-1/2 flex-col items-center gap-2.5 xl:flex">
+      <span className="text-[10px] tracking-[0.14em] text-[#5B6058]/70 [font-family:var(--font-mono)]" style={{ writingMode: 'vertical-rl' }}>
+        SCROLL
+      </span>
+      <div className="relative h-36 w-px overflow-hidden bg-[#14181B]/14">
+        <div
+          className="absolute bottom-0 left-0 w-px bg-[#E15B12]"
+          style={{ height: `${progress * 100}%`, transition: 'height 120ms linear' }}
+        />
+      </div>
+      <span className="w-8 text-center text-[10px] tabular-nums text-[#5B6058]/70 [font-family:var(--font-mono)]">
+        {String(Math.round(progress * 100)).padStart(2, '0')}%
+      </span>
     </div>
   );
 }
@@ -404,17 +522,174 @@ function Modal({
         role="dialog"
         aria-modal="true"
         aria-labelledby={labelledBy}
-        className="relative w-full max-w-[440px] rounded-t-2xl sm:rounded-md bg-[#F6F6F1] border border-[#14181B]/12 shadow-[0_24px_60px_-16px_rgba(20,24,27,0.35)] modal-panel"
+        className="relative w-full max-w-[440px] rounded-t-2xl sm:rounded-md bg-[#F6F6F1] border border-[#14181B]/12 shadow-[0_28px_70px_-18px_rgba(20,24,27,0.38)] modal-panel"
       >
         <CornerFrame tone="border-[#14181B]/14" />
         <button
           onClick={onClose}
           aria-label="Close dialog"
-          className="absolute right-4 top-4 grid h-8 w-8 place-items-center rounded-full border border-[#14181B]/14 text-[#14181B] transition-colors hover:bg-[#14181B]/6 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E15B12]"
+          className="absolute right-4 top-4 grid h-8 w-8 place-items-center rounded-full border border-[#14181B]/14 text-[#14181B] transition-colors duration-150 hover:bg-[#14181B]/6 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#E15B12] active:scale-95"
         >
           <IconClose className="h-4 w-4" />
         </button>
         <div className="p-7 sm:p-8">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------- */
+/*  Firmware card — extracted so each instance owns its own tilt state      */
+/* ----------------------------------------------------------------------- */
+
+function FirmwareCard({
+  product,
+  onOrder,
+  onNotify,
+}: {
+  product: FirmwareProduct;
+  onOrder: (p: FirmwareProduct) => void;
+  onNotify: (p: FirmwareProduct) => void;
+}) {
+  const { ref, onMove, onLeave } = useTilt<HTMLDivElement>();
+
+  return (
+    <div
+      ref={ref}
+      onMouseMove={onMove}
+      onMouseLeave={onLeave}
+      className="tilt-card relative flex flex-col overflow-hidden rounded-[8px] border border-[#14181B]/12 bg-[#F6F6F1] p-8 shadow-[0_1px_0_rgba(20,24,27,0.04)] transition-shadow duration-300 hover:shadow-[0_30px_64px_-32px_rgba(20,24,27,0.45)]"
+    >
+      <span aria-hidden="true" className="tilt-glare pointer-events-none absolute inset-0" />
+      <CornerFrame />
+      <div className="flex items-start justify-between">
+        <span
+          className={`inline-flex rounded-[3px] px-2.5 py-1 text-[11px] font-semibold tracking-[0.03em] ${
+            product.status === 'BEST SELLER'
+              ? 'bg-[#E15B12] text-[#F6F6F1]'
+              : 'border border-[#14181B]/25 text-[#4A4F47]'
+          }`}
+        >
+          {product.status}
+        </span>
+        <div className="flex gap-1.5">
+          {product.tags.map((tag) => (
+            <span
+              key={tag}
+              className="rounded-[3px] border border-[#14181B]/14 px-2 py-1 text-[11px] text-[#5B6058] [font-family:var(--font-mono)]"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      <h3 className="mt-6 text-[27px] font-bold leading-tight tracking-[-0.01em] [font-family:var(--font-display)]">
+        {product.name}
+      </h3>
+      <p className="mt-1 text-[14px] text-[#5B6058]">{product.tagline}</p>
+      <p className="mt-4 max-w-[42ch] text-[14.5px] leading-relaxed text-[#4A4F47]">
+        {product.description}
+      </p>
+
+      <ul className="mt-6 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        {product.features.map((f) => (
+          <li key={f.label} className="flex items-center gap-2 text-[13.5px] text-[#3A3F38]">
+            {f.active ? (
+              <IconCheck className="h-3.5 w-3.5 flex-shrink-0 text-[#E15B12]" />
+            ) : (
+              <IconDot className="h-3.5 w-3.5 flex-shrink-0 text-[#9AA095]" />
+            )}
+            {f.label}
+          </li>
+        ))}
+      </ul>
+
+      <div className="mt-8 flex items-end justify-between border-t border-[#14181B]/10 pt-6">
+        <div>
+          {product.priceFinal !== null ? (
+            <div className="flex items-baseline gap-2.5">
+              <span className="text-[13px] text-[#9AA095] line-through [font-family:var(--font-mono)]">
+                {currency(product.priceOriginal)}
+              </span>
+              <span className="text-[29px] font-bold text-[#E15B12] [font-family:var(--font-display)]">
+                FREE
+              </span>
+            </div>
+          ) : (
+            <div className="text-[19px] font-semibold [font-family:var(--font-display)]">
+              {product.priceNote}
+            </div>
+          )}
+          {product.priceFinal !== null && (
+            <div className="mt-1 text-[12px] text-[#5B6058]">{product.priceNote}</div>
+          )}
+        </div>
+
+        <button
+          onClick={() => (product.action === 'order' ? onOrder(product) : onNotify(product))}
+          className={`inline-flex items-center gap-2 rounded-[3px] px-5 py-3 text-[14px] font-medium transition-all duration-200 hover:-translate-y-[1px] active:translate-y-0 active:scale-[0.98] ${
+            product.action === 'order'
+              ? 'bg-[#14181B] text-[#EDEEE6] shadow-[0_10px_24px_-12px_rgba(20,24,27,0.55)] hover:bg-[#22282C]'
+              : 'border border-[#14181B]/25 text-[#14181B] hover:border-[#14181B]/50'
+          }`}
+        >
+          {product.cta}
+          <IconArrow className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------- */
+/*  Component card — same tilt treatment, part-specific illustration        */
+/* ----------------------------------------------------------------------- */
+
+function ComponentCard({ item, onOrder }: { item: ComponentItem; onOrder: () => void }) {
+  const { ref, onMove, onLeave } = useTilt<HTMLDivElement>();
+  const Icon = item.kind === 'frame' ? IconFrame : IconMotor;
+
+  return (
+    <div
+      ref={ref}
+      onMouseMove={onMove}
+      onMouseLeave={onLeave}
+      className="tilt-card relative flex flex-col overflow-hidden rounded-[8px] border border-[#14181B]/12 bg-[#F6F6F1] p-7 shadow-[0_1px_0_rgba(20,24,27,0.04)] transition-shadow duration-300 hover:shadow-[0_24px_54px_-30px_rgba(20,24,27,0.4)]"
+    >
+      <span aria-hidden="true" className="tilt-glare pointer-events-none absolute inset-0" />
+      <CornerFrame />
+      {item.tag && (
+        <span className="absolute right-6 top-6 rounded-[3px] bg-[#1F3448] px-2.5 py-1 text-[10.5px] font-semibold tracking-[0.03em] text-[#EDEEE6]">
+          {item.tag}
+        </span>
+      )}
+
+      <div className="relative grid h-16 w-16 place-items-center rounded-[6px] border border-[#1F3448]/18 bg-[#1F3448]/[0.05]">
+        <Icon className="h-9 w-9 text-[#1F3448]" />
+        {item.kind === 'frame' && (
+          <>
+            <span className="absolute -left-2 top-1/2 hidden h-px w-2 -translate-y-1/2 bg-[#1F3448]/30 sm:block" />
+            <span className="absolute -right-2 top-1/2 hidden h-px w-2 -translate-y-1/2 bg-[#1F3448]/30 sm:block" />
+          </>
+        )}
+      </div>
+
+      <h3 className="mt-6 text-[19px] font-semibold [font-family:var(--font-display)]">{item.name}</h3>
+      <p className="mt-2 text-[14px] leading-relaxed text-[#4A4F47]">{item.description}</p>
+
+      <div className="mt-7 flex items-end justify-between border-t border-[#14181B]/10 pt-5">
+        <div>
+          <div className="text-[22px] font-bold [font-family:var(--font-display)]">{currency(item.price)}</div>
+          <div className="text-[12px] text-[#5B6058]">+ shipping charges</div>
+        </div>
+        <button
+          onClick={onOrder}
+          className="inline-flex items-center gap-2 rounded-[3px] border border-[#14181B]/25 px-4 py-2.5 text-[13.5px] font-medium text-[#14181B] transition-colors duration-200 hover:border-[#14181B]/50 active:scale-[0.98]"
+        >
+          Order online
+          <IconArrow className="h-3.5 w-3.5" />
+        </button>
       </div>
     </div>
   );
@@ -438,15 +713,26 @@ export default function Page() {
   const [downloaded, setDownloaded] = useState(false);
   const [downloading, setDownloading] = useState(false);
 
+  const reduceMotion = useSyncExternalStore(
+    subscribeToReducedMotion,
+    getReducedMotionSnapshot,
+    getServerReducedMotionSnapshot,
+  );
   const [telemetry, setTelemetry] = useState({ alt: 118, batt: 87, sats: 11, sig: 4 });
   const [reticle, setReticle] = useState({ x: 50, y: 42, active: false });
+  const [scrollProgress, setScrollProgress] = useState(0);
 
   const processRef = useRef<HTMLDivElement | null>(null);
   const [processVisible, setProcessVisible] = useState(false);
 
-  /* header shadow on scroll */
+  /* header shadow + scroll progress */
   useEffect(() => {
-    const onScroll = () => setScrolled(window.scrollY > 8);
+    const onScroll = () => {
+      setScrolled(window.scrollY > 8);
+      const h = document.documentElement;
+      const scrollable = h.scrollHeight - h.clientHeight;
+      setScrollProgress(scrollable > 0 ? clamp(window.scrollY / scrollable, 0, 1) : 0);
+    };
     onScroll();
     window.addEventListener('scroll', onScroll, { passive: true });
     return () => window.removeEventListener('scroll', onScroll);
@@ -454,8 +740,7 @@ export default function Page() {
 
   /* telemetry tick */
   useEffect(() => {
-    const prefersReduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (prefersReduced) return;
+    if (reduceMotion) return;
     const id = setInterval(() => {
       setTelemetry((t) => ({
         alt: Math.round(clamp(t.alt + rand(-4, 4), 78, 162)),
@@ -465,7 +750,7 @@ export default function Page() {
       }));
     }, 1900);
     return () => clearInterval(id);
-  }, []);
+  }, [reduceMotion]);
 
   /* process line reveal */
   useEffect(() => {
@@ -549,6 +834,12 @@ export default function Page() {
     >
       <GlobalStyle />
 
+      {/* fine paper-grain texture over the whole page — keeps flat colors
+          from feeling like plastic swatches */}
+      <div aria-hidden="true" className="grain-overlay pointer-events-none fixed inset-0 z-[1]" />
+
+      <AltitudeIndicator progress={scrollProgress} />
+
       {/* ---------------------------------------------------------------- */}
       {/* Header                                                            */}
       {/* ---------------------------------------------------------------- */}
@@ -588,7 +879,7 @@ export default function Page() {
           <div className="flex items-center gap-3">
             <button
               onClick={() => handleNavClick('#firmware')}
-              className="hidden items-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-2.5 text-[13.5px] font-medium text-[#EDEEE6] transition-transform duration-200 hover:-translate-y-[1px] hover:bg-[#22282C] sm:inline-flex"
+              className="hidden items-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-2.5 text-[13.5px] font-medium text-[#EDEEE6] shadow-[0_10px_24px_-14px_rgba(20,24,27,0.6)] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[#22282C] active:translate-y-0 active:scale-[0.98] sm:inline-flex"
             >
               Shop now
               <IconArrow className="h-3.5 w-3.5" />
@@ -596,7 +887,7 @@ export default function Page() {
             <button
               aria-label="Toggle menu"
               onClick={() => setMenuOpen((v) => !v)}
-              className="grid h-10 w-10 place-items-center rounded-[3px] border border-[#14181B]/14 text-[#14181B] lg:hidden"
+              className="grid h-10 w-10 place-items-center rounded-[3px] border border-[#14181B]/14 text-[#14181B] transition-colors duration-150 hover:bg-[#14181B]/6 lg:hidden"
             >
               {menuOpen ? <IconClose className="h-5 w-5" /> : <IconMenu className="h-5 w-5" />}
             </button>
@@ -622,7 +913,7 @@ export default function Page() {
             </nav>
             <button
               onClick={() => handleNavClick('#firmware')}
-              className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-3 text-[14px] font-medium text-[#EDEEE6]"
+              className="mt-5 inline-flex w-full items-center justify-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-3 text-[14px] font-medium text-[#EDEEE6] active:scale-[0.98]"
             >
               Shop now
               <IconArrow className="h-3.5 w-3.5" />
@@ -640,15 +931,11 @@ export default function Page() {
           {/* Copy */}
           <div className="relative z-10">
             <div className="hero-in hero-in-1 inline-flex items-center gap-2 rounded-[3px] border border-[#14181B]/14 bg-[#F6F6F1] px-3 py-1.5 text-[12.5px] text-[#3A3F38]">
-              <span className="flex h-3.5 w-5 overflow-hidden rounded-[1px] border border-[#14181B]/15">
-                <span className="w-1/3 bg-[#E15B12]" />
-                <span className="w-1/3 bg-[#F6F6F1]" />
-                <span className="w-1/3 bg-[#1F3448]" />
-              </span>
+              <IndianFlag className="h-3.5 w-5 rounded-[1px] border border-[#14181B]/15" />
               Made in India
             </div>
 
-            <h1 className="hero-in hero-in-2 mt-6 text-[clamp(2.8rem,7vw,5rem)] font-bold leading-[0.98] tracking-[-0.01em] [font-family:var(--font-display)]">
+            <h1 className="hero-in hero-in-2 mt-6 text-[clamp(2.9rem,7vw,5.2rem)] font-bold leading-[0.97] tracking-[-0.015em] [font-family:var(--font-display)]">
               Fly beyond
               <br />
               <span className="text-[#E15B12]">limits.</span>
@@ -662,14 +949,14 @@ export default function Page() {
             <div className="hero-in hero-in-4 mt-9 flex flex-wrap items-center gap-4">
               <button
                 onClick={() => handleNavClick('#firmware')}
-                className="group inline-flex items-center gap-2 rounded-[3px] bg-[#14181B] px-6 py-3.5 text-[14.5px] font-medium text-[#EDEEE6] transition-transform duration-200 hover:-translate-y-[1px] hover:bg-[#22282C]"
+                className="group inline-flex items-center gap-2 rounded-[3px] bg-[#14181B] px-6 py-3.5 text-[14.5px] font-medium text-[#EDEEE6] shadow-[0_16px_34px_-16px_rgba(20,24,27,0.55)] transition-all duration-200 hover:-translate-y-[1px] hover:bg-[#22282C] active:translate-y-0 active:scale-[0.98]"
               >
                 Shop firmware
                 <IconArrow className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-0.5" />
               </button>
               <button
                 onClick={() => handleNavClick('#components')}
-                className="inline-flex items-center gap-2 rounded-[3px] border border-[#14181B]/22 px-6 py-3.5 text-[14.5px] font-medium text-[#14181B] transition-colors duration-200 hover:border-[#14181B]/45"
+                className="inline-flex items-center gap-2 rounded-[3px] border border-[#14181B]/22 px-6 py-3.5 text-[14.5px] font-medium text-[#14181B] transition-colors duration-200 hover:border-[#14181B]/45 active:scale-[0.98]"
               >
                 View drone components
               </button>
@@ -697,9 +984,32 @@ export default function Page() {
             onMouseMove={handleHeroMouseMove}
             onMouseLeave={() => setReticle((r) => ({ ...r, active: false }))}
           >
-            <div className="relative mx-auto aspect-[4/5] w-full max-w-[420px] overflow-hidden rounded-[6px] border border-[#14181B]/16 bg-[#14181B]">
+            <div className="relative mx-auto aspect-[4/5] w-full max-w-[420px] overflow-hidden rounded-[8px] border border-[#14181B]/16 bg-[#14181B]">
               <CornerFrame tone="border-[#EDEEE6]/45" />
               <div className="blueprint-grid-dark pointer-events-none absolute inset-0 opacity-40" />
+
+              {/* flight-plan overlay — draws in once on load, then rests */}
+              <svg
+                className="pointer-events-none absolute inset-0 h-full w-full"
+                viewBox="0 0 100 125"
+                preserveAspectRatio="none"
+                aria-hidden="true"
+              >
+                <path
+                  d="M13 100 C 30 80, 24 54, 45 47 S 80 36, 89 15"
+                  fill="none"
+                  stroke="#E15B12"
+                  strokeWidth="0.55"
+                  strokeDasharray="1.1 1.6"
+                  strokeLinecap="round"
+                  pathLength={1}
+                  className={reduceMotion ? '' : 'flight-path'}
+                  style={reduceMotion ? { strokeDashoffset: 0, opacity: 0.85 } : undefined}
+                />
+                <circle cx="13" cy="100" r="1.5" fill="#EDEEE6" className={reduceMotion ? '' : 'waypoint wp-1'} style={reduceMotion ? { opacity: 1 } : undefined} />
+                <circle cx="45" cy="47" r="1.5" fill="#EDEEE6" className={reduceMotion ? '' : 'waypoint wp-2'} style={reduceMotion ? { opacity: 1 } : undefined} />
+                <circle cx="89" cy="15" r="1.5" fill="#E15B12" className={reduceMotion ? '' : 'waypoint wp-3'} style={reduceMotion ? { opacity: 1 } : undefined} />
+              </svg>
 
               {/* reticle */}
               <div
@@ -717,7 +1027,7 @@ export default function Page() {
 
               {/* drone glyph */}
               <div className="absolute inset-0 grid place-items-center">
-                <IconDrone className="h-28 w-28 text-[#EDEEE6]/85 drone-float" />
+                <IconDrone className={`h-28 w-28 text-[#EDEEE6]/85 ${reduceMotion ? '' : 'drone-float'}`} />
               </div>
 
               {/* telemetry readout */}
@@ -725,7 +1035,7 @@ export default function Page() {
                 <div className="flex items-center justify-between text-[10.5px] uppercase tracking-[0.14em] text-[#EDEEE6]/55">
                   <span>Flight telemetry</span>
                   <span className="flex items-center gap-1.5">
-                    <span className="h-1.5 w-1.5 rounded-full bg-[#E15B12] telemetry-pulse" />
+                    <span className={`h-1.5 w-1.5 rounded-full bg-[#E15B12] ${reduceMotion ? '' : 'telemetry-pulse'}`} />
                     Live
                   </span>
                 </div>
@@ -758,7 +1068,7 @@ export default function Page() {
         >
           Scroll
           <span className="relative h-8 w-px overflow-hidden bg-[#14181B]/15">
-            <span className="absolute inset-x-0 top-0 h-3 bg-[#E15B12] scroll-tick" />
+            <span className={`absolute inset-x-0 top-0 h-3 bg-[#E15B12] ${reduceMotion ? '' : 'scroll-tick'}`} />
           </span>
         </button>
       </section>
@@ -771,28 +1081,36 @@ export default function Page() {
           <SectionHeading kicker="Who we are" title={<>Crafted with passion,<br />engineered for precision</>} />
 
           <div className="mt-14 grid gap-6 md:grid-cols-2">
-            <div className="relative overflow-hidden rounded-[6px] border border-[#14181B]/12 bg-[#F6F6F1] p-8 transition-shadow duration-300 hover:shadow-[0_16px_40px_-24px_rgba(20,24,27,0.35)]">
+            <div className="relative overflow-hidden rounded-[8px] border border-[#14181B]/12 bg-[#F6F6F1] p-8 shadow-[0_1px_0_rgba(20,24,27,0.04)] transition-shadow duration-300 hover:shadow-[0_18px_44px_-26px_rgba(20,24,27,0.35)]">
               <CornerFrame />
-              <IconFrame className="h-11 w-11 text-[#E15B12]" />
+              <div className="relative grid h-16 w-16 place-items-center rounded-[6px] border border-[#E15B12]/25 bg-[#E15B12]/[0.06]">
+                <IconFrame className="h-9 w-9 text-[#E15B12]" />
+              </div>
               <h3 className="mt-6 text-[21px] font-semibold [font-family:var(--font-display)]">Drone frames &amp; components</h3>
               <p className="mt-3 max-w-[46ch] text-[15px] leading-relaxed text-[#4A4F47]">
                 Premium 3D-printed drone frames engineered for aerodynamic efficiency, durability,
                 and easy assembly — available in three configurations.
               </p>
+              <div className="mt-6 flex items-center gap-4 border-t border-[#14181B]/10 pt-5 text-[12px] text-[#5B6058] [font-family:var(--font-mono)]">
+                <span>PLA + PETG</span>
+                <span className="h-3 w-px bg-[#14181B]/15" />
+                <span>8520 coreless mount</span>
+              </div>
             </div>
 
-            <div className="relative overflow-hidden rounded-[6px] border border-[#14181B]/12 bg-[#F6F6F1] p-8 transition-shadow duration-300 hover:shadow-[0_16px_40px_-24px_rgba(20,24,27,0.35)]">
+            <div className="relative overflow-hidden rounded-[8px] border border-[#14181B]/12 bg-[#F6F6F1] p-8 shadow-[0_1px_0_rgba(20,24,27,0.04)] transition-shadow duration-300 hover:shadow-[0_18px_44px_-26px_rgba(20,24,27,0.35)]">
               <CornerFrame />
-              <div className="flex h-11 w-11 overflow-hidden rounded-[3px] border border-[#14181B]/15">
-                <span className="w-1/3 bg-[#E15B12]" />
-                <span className="w-1/3 bg-[#F6F6F1]" />
-                <span className="w-1/3 bg-[#1F3448]" />
-              </div>
+              <IndianFlag className="h-16 w-16 rounded-[6px] border border-[#14181B]/15" />
               <h3 className="mt-6 text-[21px] font-semibold [font-family:var(--font-display)]">Made in India</h3>
               <p className="mt-3 max-w-[46ch] text-[15px] leading-relaxed text-[#4A4F47]">
                 Proudly built in India. We design, print, code, and test every product
                 in-house, end to end, to hold one consistent quality bar.
               </p>
+              <div className="mt-6 flex items-center gap-4 border-t border-[#14181B]/10 pt-5 text-[12px] text-[#5B6058] [font-family:var(--font-mono)]">
+                <span>Design → print → test</span>
+                <span className="h-3 w-px bg-[#14181B]/15" />
+                <span>One team, one bar</span>
+              </div>
             </div>
           </div>
         </div>
@@ -813,88 +1131,7 @@ export default function Page() {
 
           <div className="mt-14 grid gap-6 lg:grid-cols-2">
             {FIRMWARE.map((product) => (
-              <div
-                key={product.id}
-                className="relative flex flex-col overflow-hidden rounded-[6px] border border-[#14181B]/12 bg-[#F6F6F1] p-8 transition-shadow duration-300 hover:shadow-[0_20px_48px_-26px_rgba(20,24,27,0.4)]"
-              >
-                <CornerFrame />
-                <div className="flex items-start justify-between">
-                  <span
-                    className={`inline-flex rounded-[3px] px-2.5 py-1 text-[11px] font-semibold tracking-[0.03em] ${
-                      product.status === 'BEST SELLER'
-                        ? 'bg-[#E15B12] text-[#F6F6F1]'
-                        : 'border border-[#14181B]/25 text-[#4A4F47]'
-                    }`}
-                  >
-                    {product.status}
-                  </span>
-                  <div className="flex gap-1.5">
-                    {product.tags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="rounded-[3px] border border-[#14181B]/14 px-2 py-1 text-[11px] text-[#5B6058] [font-family:var(--font-mono)]"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                <h3 className="mt-6 text-[26px] font-bold leading-tight [font-family:var(--font-display)]">
-                  {product.name}
-                </h3>
-                <p className="mt-1 text-[14px] text-[#5B6058]">{product.tagline}</p>
-                <p className="mt-4 max-w-[42ch] text-[14.5px] leading-relaxed text-[#4A4F47]">
-                  {product.description}
-                </p>
-
-                <ul className="mt-6 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                  {product.features.map((f) => (
-                    <li key={f.label} className="flex items-center gap-2 text-[13.5px] text-[#3A3F38]">
-                      {f.active ? (
-                        <IconCheck className="h-3.5 w-3.5 flex-shrink-0 text-[#E15B12]" />
-                      ) : (
-                        <IconDot className="h-3.5 w-3.5 flex-shrink-0 text-[#9AA095]" />
-                      )}
-                      {f.label}
-                    </li>
-                  ))}
-                </ul>
-
-                <div className="mt-8 flex items-end justify-between border-t border-[#14181B]/10 pt-6">
-                  <div>
-                    {product.priceFinal !== null ? (
-                      <div className="flex items-baseline gap-2.5">
-                        <span className="text-[13px] text-[#9AA095] line-through [font-family:var(--font-mono)]">
-                          {currency(product.priceOriginal)}
-                        </span>
-                        <span className="text-[28px] font-bold text-[#E15B12] [font-family:var(--font-display)]">
-                          FREE
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="text-[19px] font-semibold [font-family:var(--font-display)]">
-                        {product.priceNote}
-                      </div>
-                    )}
-                    {product.priceFinal !== null && (
-                      <div className="mt-1 text-[12px] text-[#5B6058]">{product.priceNote}</div>
-                    )}
-                  </div>
-
-                  <button
-                    onClick={() => (product.action === 'order' ? openOrder(product) : openNotify(product))}
-                    className={`inline-flex items-center gap-2 rounded-[3px] px-5 py-3 text-[14px] font-medium transition-transform duration-200 hover:-translate-y-[1px] ${
-                      product.action === 'order'
-                        ? 'bg-[#14181B] text-[#EDEEE6] hover:bg-[#22282C]'
-                        : 'border border-[#14181B]/25 text-[#14181B] hover:border-[#14181B]/50'
-                    }`}
-                  >
-                    {product.cta}
-                    <IconArrow className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
+              <FirmwareCard key={product.id} product={product} onOrder={openOrder} onNotify={openNotify} />
             ))}
           </div>
         </div>
@@ -912,34 +1149,7 @@ export default function Page() {
 
           <div className="mt-12 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
             {COMPONENTS.map((c) => (
-              <div
-                key={c.id}
-                className="relative flex flex-col overflow-hidden rounded-[6px] border border-[#14181B]/12 bg-[#F6F6F1] p-7 transition-shadow duration-300 hover:shadow-[0_16px_40px_-24px_rgba(20,24,27,0.35)]"
-              >
-                <CornerFrame />
-                {c.tag && (
-                  <span className="absolute right-6 top-6 rounded-[3px] bg-[#1F3448] px-2.5 py-1 text-[10.5px] font-semibold tracking-[0.03em] text-[#EDEEE6]">
-                    {c.tag}
-                  </span>
-                )}
-                <IconFrame className="h-10 w-10 text-[#1F3448]" />
-                <h3 className="mt-6 text-[19px] font-semibold [font-family:var(--font-display)]">{c.name}</h3>
-                <p className="mt-2 text-[14px] leading-relaxed text-[#4A4F47]">{c.description}</p>
-
-                <div className="mt-7 flex items-end justify-between border-t border-[#14181B]/10 pt-5">
-                  <div>
-                    <div className="text-[22px] font-bold [font-family:var(--font-display)]">{currency(c.price)}</div>
-                    <div className="text-[12px] text-[#5B6058]">+ shipping charges</div>
-                  </div>
-                  <button
-                    onClick={() => setModal('comingSoon')}
-                    className="inline-flex items-center gap-2 rounded-[3px] border border-[#14181B]/25 px-4 py-2.5 text-[13.5px] font-medium text-[#14181B] transition-colors duration-200 hover:border-[#14181B]/50"
-                  >
-                    Order online
-                    <IconArrow className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
+              <ComponentCard key={c.id} item={c} onOrder={() => setModal('comingSoon')} />
             ))}
           </div>
         </div>
@@ -993,7 +1203,7 @@ export default function Page() {
             <span className="h-[6px] w-[6px] rounded-full bg-[#E15B12]" />
             Get in touch
           </div>
-          <h2 className="mt-3 text-[clamp(2rem,4.4vw,3rem)] font-bold leading-[1.05] [font-family:var(--font-display)]">
+          <h2 className="mt-3 text-[clamp(2.1rem,4.4vw,3.1rem)] font-bold leading-[1.05] [font-family:var(--font-display)]">
             Have questions?
           </h2>
           <p className="mt-4 max-w-[52ch] text-[15px] leading-relaxed text-[#EDEEE6]/65">
@@ -1009,7 +1219,7 @@ export default function Page() {
                   href={c.href}
                   target={c.icon === 'mail' ? undefined : '_blank'}
                   rel="noreferrer"
-                  className="group relative flex items-center justify-between overflow-hidden rounded-[6px] border border-[#EDEEE6]/14 p-6 transition-colors duration-200 hover:border-[#E15B12]/60 hover:bg-[#EDEEE6]/[0.03]"
+                  className="group relative flex items-center justify-between overflow-hidden rounded-[8px] border border-[#EDEEE6]/14 p-6 transition-colors duration-200 hover:border-[#E15B12]/60 hover:bg-[#EDEEE6]/[0.03]"
                 >
                   <div className="flex items-center gap-3.5">
                     <span className="grid h-10 w-10 place-items-center rounded-[4px] border border-[#EDEEE6]/16">
@@ -1106,7 +1316,7 @@ export default function Page() {
             <button
               onClick={confirmOrder}
               disabled={downloading}
-              className="mt-7 inline-flex w-full items-center justify-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-3.5 text-[14.5px] font-medium text-[#EDEEE6] transition-colors duration-200 hover:bg-[#22282C] disabled:opacity-60"
+              className="mt-7 inline-flex w-full items-center justify-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-3.5 text-[14.5px] font-medium text-[#EDEEE6] transition-colors duration-200 hover:bg-[#22282C] disabled:opacity-60 active:scale-[0.98]"
             >
               {downloading ? 'Preparing download…' : 'Continue & download'}
               {!downloading && <IconArrow className="h-4 w-4" />}
@@ -1145,7 +1355,7 @@ export default function Page() {
 
         <button
           onClick={() => setModal(null)}
-          className="mt-7 inline-flex w-full items-center justify-center rounded-[3px] border border-[#14181B]/20 px-5 py-3 text-[14px] font-medium text-[#14181B] transition-colors hover:border-[#14181B]/45"
+          className="mt-7 inline-flex w-full items-center justify-center rounded-[3px] border border-[#14181B]/20 px-5 py-3 text-[14px] font-medium text-[#14181B] transition-colors hover:border-[#14181B]/45 active:scale-[0.98]"
         >
           Done
         </button>
@@ -1219,7 +1429,7 @@ export default function Page() {
               />
               <button
                 type="submit"
-                className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-3.5 text-[14.5px] font-medium text-[#EDEEE6] transition-colors hover:bg-[#22282C]"
+                className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-[3px] bg-[#14181B] px-5 py-3.5 text-[14.5px] font-medium text-[#EDEEE6] transition-colors hover:bg-[#22282C] active:scale-[0.98]"
               >
                 Notify me
                 <IconArrow className="h-4 w-4" />
@@ -1241,7 +1451,7 @@ export default function Page() {
             </p>
             <button
               onClick={() => setModal(null)}
-              className="mt-7 inline-flex w-full items-center justify-center rounded-[3px] border border-[#14181B]/20 px-5 py-3 text-[14px] font-medium text-[#14181B] transition-colors hover:border-[#14181B]/45"
+              className="mt-7 inline-flex w-full items-center justify-center rounded-[3px] border border-[#14181B]/20 px-5 py-3 text-[14px] font-medium text-[#14181B] transition-colors hover:border-[#14181B]/45 active:scale-[0.98]"
             >
               Done
             </button>
@@ -1297,6 +1507,12 @@ function GlobalStyle() {
         background-size: 24px 24px;
       }
 
+      .grain-overlay {
+        opacity: 0.035;
+        mix-blend-mode: multiply;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+      }
+
       .nav-link::after {
         content: '';
         position: absolute;
@@ -1309,6 +1525,29 @@ function GlobalStyle() {
       }
       .nav-link:hover::after {
         right: 0;
+      }
+
+      /* card tilt + glare — driven by --tiltX/--tiltY/--glareX/--glareY,
+         set from JS on mousemove; rests at 0 with a spring-out transition */
+      .tilt-card {
+        --tiltX: 0deg;
+        --tiltY: 0deg;
+        --glareX: 50%;
+        --glareY: 50%;
+        transform: perspective(1000px) rotateX(var(--tiltX)) rotateY(var(--tiltY));
+        transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+        will-change: transform;
+      }
+      .tilt-card:hover {
+        transition: transform 0.06s linear;
+      }
+      .tilt-glare {
+        opacity: 0;
+        background: radial-gradient(480px circle at var(--glareX) var(--glareY), rgba(225, 91, 18, 0.09), transparent 62%);
+        transition: opacity 0.3s ease;
+      }
+      .tilt-card:hover .tilt-glare {
+        opacity: 1;
       }
 
       @keyframes heroReveal {
@@ -1355,6 +1594,28 @@ function GlobalStyle() {
         animation: scrollTick 1.8s ease-in-out infinite;
       }
 
+      /* flight-plan draw-in: one orchestrated moment, not a loop */
+      @keyframes pathDraw {
+        to { stroke-dashoffset: 0; }
+      }
+      .flight-path {
+        stroke-dashoffset: 1;
+        animation: pathDraw 1.7s cubic-bezier(0.65, 0, 0.2, 1) 1.05s forwards;
+      }
+      @keyframes waypointIn {
+        from { opacity: 0; transform: scale(0.3); }
+        to { opacity: 1; transform: scale(1); }
+      }
+      .waypoint {
+        opacity: 0;
+        transform-origin: center;
+        transform-box: fill-box;
+        animation: waypointIn 0.45s ease forwards;
+      }
+      .wp-1 { animation-delay: 1.1s; }
+      .wp-2 { animation-delay: 1.85s; }
+      .wp-3 { animation-delay: 2.55s; }
+
       @keyframes modalIn {
         from { opacity: 0; transform: translateY(10px) scale(0.98); }
         to { opacity: 1; transform: translateY(0) scale(1); }
@@ -1372,10 +1633,13 @@ function GlobalStyle() {
 
       @media (prefers-reduced-motion: reduce) {
         html { scroll-behavior: auto; }
-        .hero-in, .drone-float, .telemetry-pulse, .scroll-tick, .modal-panel, .modal-backdrop {
+        .hero-in, .drone-float, .telemetry-pulse, .scroll-tick,
+        .modal-panel, .modal-backdrop, .flight-path, .waypoint,
+        .tilt-card {
           animation: none !important;
           opacity: 1 !important;
           transform: none !important;
+          transition: none !important;
         }
       }
     `}</style>
